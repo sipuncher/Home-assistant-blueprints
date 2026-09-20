@@ -177,11 +177,35 @@ blueprint:
       icon: mdi:format-text
       collapsed: true
       input:
+        display_layout:
+          name: Running display layout
+          description: >-
+            iOS cannot show the message, live countdown and progress percentage
+            simultaneously. Choose which information should be prioritised.
+          default: state_progress_remaining
+          selector:
+            select:
+              options:
+                - label: State, progress and periodically updated time remaining
+                  value: state_progress_remaining
+                - label: State and live countdown
+                  value: state_countdown
+                - label: Progress and live countdown
+                  value: progress_countdown
+        state_message_format:
+          name: State and remaining-time message
+          description: >-
+            Used by the state-and-progress layout. Supports {state}, {remaining}
+            and {finish_time}.
+          default: "{state} · {remaining} remaining"
+          selector:
+            text:
         running_message_format:
           name: Running message
           description: >-
-            Supports {finish_time} and {state}. The title is intentionally not
-            templated because iOS treats it as static after an activity starts.
+            Fallback message used by countdown layouts. Supports {finish_time},
+            {remaining} and {state}. iOS hides this message while its live
+            chronometer is displayed.
           default: "Running - due {finish_time}"
           selector:
             text:
@@ -256,6 +280,8 @@ variables:
   progress_mode: !input progress_mode
   start_sensor: !input start_sensor
   progress_sensor: !input progress_sensor
+  display_layout: !input display_layout
+  state_message_format: !input state_message_format
   running_message_format: !input running_message_format
   completed_message: !input completed_message
   completion_notification_title: !input completion_notification_title
@@ -401,10 +427,34 @@ variables:
       unknown
     {% endif %}
 
+  remaining_seconds: >-
+    {{ [finish_timestamp - now_timestamp, 0] | max }}
+
+  remaining_minutes: >-
+    {{ ((remaining_seconds | int + 59) / 60) | int }}
+
+  remaining_text: >-
+    {% set minutes = remaining_minutes | int %}
+    {% if minutes >= 60 %}
+      {{ minutes // 60 }}h {{ minutes % 60 }}m
+    {% else %}
+      {{ minutes }} min
+    {% endif %}
+
+  appliance_state_display: >-
+    {{ appliance_state | replace('_', ' ') | replace('-', ' ') | title }}
+
+  state_message: >-
+    {{ state_message_format
+       | replace('{finish_time}', finish_local)
+       | replace('{remaining}', remaining_text)
+       | replace('{state}', appliance_state_display) }}
+
   running_message: >-
     {{ running_message_format
        | replace('{finish_time}', finish_local)
-       | replace('{state}', appliance_state) }}
+       | replace('{remaining}', remaining_text)
+       | replace('{state}', appliance_state_display) }}
 
 actions:
   - choose:
@@ -506,10 +556,12 @@ actions:
                  and appliance_state not in ['unknown', 'unavailable'] }}
         sequence:
           - choose:
-              - alias: Update with timestamp-derived progress
+              - alias: Show state, timestamp progress and remaining time
                 conditions:
                   - condition: template
-                    value_template: "{{ has_timestamp_progress | bool }}"
+                    value_template: >-
+                      {{ display_layout == 'state_progress_remaining'
+                         and has_timestamp_progress | bool }}
                 sequence:
                   - repeat:
                       for_each: "{{ notify_services }}"
@@ -517,14 +569,14 @@ actions:
                         - action: "{{ repeat.item }}"
                           data:
                             title: "{{ appliance_name }}"
-                            message: "{{ running_message }}"
+                            message: "{{ state_message }}"
                             data:
                               tag: "{{ activity_tag }}"
                               live_update: true
-                              chronometer: true
-                              when: "{{ finish_timestamp }}"
+                              critical_text: "{{ appliance_state_display }}"
                               progress: "{{ elapsed_seconds | int }}"
                               progress_max: "{{ total_seconds | int }}"
+                              progress_bar_direction: increasing
                               alert_once: true
                               silent: true
                               notification_icon: "{{ running_icon }}"
@@ -533,10 +585,43 @@ actions:
                               color: "{{ running_color }}"
                               url: "{{ dashboard_url }}"
 
-              - alias: Update with percentage progress
+              - alias: Show state, percentage progress and remaining time
                 conditions:
                   - condition: template
-                    value_template: "{{ has_percentage_progress | bool }}"
+                    value_template: >-
+                      {{ display_layout == 'state_progress_remaining'
+                         and has_percentage_progress | bool }}
+                sequence:
+                  - repeat:
+                      for_each: "{{ notify_services }}"
+                      sequence:
+                        - action: "{{ repeat.item }}"
+                          data:
+                            title: "{{ appliance_name }}"
+                            message: "{{ state_message }}"
+                            data:
+                              tag: "{{ activity_tag }}"
+                              live_update: true
+                              critical_text: "{{ appliance_state_display }}"
+                              progress: "{{ progress_percentage | int }}"
+                              progress_max: 100
+                              progress_bar_direction: increasing
+                              alert_once: true
+                              silent: true
+                              notification_icon: "{{ running_icon }}"
+                              notification_icon_color: "{{ running_color }}"
+                              progress_bar_color: "{{ running_color }}"
+                              color: "{{ running_color }}"
+                              url: "{{ dashboard_url }}"
+
+              - alias: Show state and live countdown
+                conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ display_layout == 'state_countdown'
+                         or (display_layout == 'state_progress_remaining'
+                             and not (has_timestamp_progress | bool)
+                             and not (has_percentage_progress | bool)) }}
                 sequence:
                   - repeat:
                       for_each: "{{ notify_services }}"
@@ -548,10 +633,70 @@ actions:
                             data:
                               tag: "{{ activity_tag }}"
                               live_update: true
+                              critical_text: "{{ appliance_state_display }}"
+                              chronometer: true
+                              when: "{{ finish_timestamp }}"
+                              alert_once: true
+                              silent: true
+                              notification_icon: "{{ running_icon }}"
+                              notification_icon_color: "{{ running_color }}"
+                              color: "{{ running_color }}"
+                              url: "{{ dashboard_url }}"
+
+              - alias: Show timestamp progress and live countdown
+                conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ display_layout == 'progress_countdown'
+                         and has_timestamp_progress | bool }}
+                sequence:
+                  - repeat:
+                      for_each: "{{ notify_services }}"
+                      sequence:
+                        - action: "{{ repeat.item }}"
+                          data:
+                            title: "{{ appliance_name }}"
+                            message: "{{ running_message }}"
+                            data:
+                              tag: "{{ activity_tag }}"
+                              live_update: true
+                              critical_text: "{{ appliance_state_display }}"
+                              chronometer: true
+                              when: "{{ finish_timestamp }}"
+                              progress: "{{ elapsed_seconds | int }}"
+                              progress_max: "{{ total_seconds | int }}"
+                              progress_bar_direction: increasing
+                              alert_once: true
+                              silent: true
+                              notification_icon: "{{ running_icon }}"
+                              notification_icon_color: "{{ running_color }}"
+                              progress_bar_color: "{{ running_color }}"
+                              color: "{{ running_color }}"
+                              url: "{{ dashboard_url }}"
+
+              - alias: Show percentage progress and live countdown
+                conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ display_layout == 'progress_countdown'
+                         and has_percentage_progress | bool }}
+                sequence:
+                  - repeat:
+                      for_each: "{{ notify_services }}"
+                      sequence:
+                        - action: "{{ repeat.item }}"
+                          data:
+                            title: "{{ appliance_name }}"
+                            message: "{{ running_message }}"
+                            data:
+                              tag: "{{ activity_tag }}"
+                              live_update: true
+                              critical_text: "{{ appliance_state_display }}"
                               chronometer: true
                               when: "{{ finish_timestamp }}"
                               progress: "{{ progress_percentage | int }}"
                               progress_max: 100
+                              progress_bar_direction: increasing
                               alert_once: true
                               silent: true
                               notification_icon: "{{ running_icon }}"
@@ -571,6 +716,7 @@ actions:
                         data:
                           tag: "{{ activity_tag }}"
                           live_update: true
+                          critical_text: "{{ appliance_state_display }}"
                           chronometer: true
                           when: "{{ finish_timestamp }}"
                           alert_once: true
