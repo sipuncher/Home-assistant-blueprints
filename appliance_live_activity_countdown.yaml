@@ -15,6 +15,10 @@ blueprint:
     blueprint; leave progress disabled when the appliance does not expose useful
     progress data.
 
+    Duration-based appliances refresh every five minutes during most of a cycle,
+    then every minute during the final five minutes. Completion alerts are sent
+    when the configured appliance state enters a finished state.
+
     Create one automation from this blueprint for each appliance, and give each
     instance a unique activity tag.
 
@@ -395,7 +399,10 @@ variables:
     {{ trigger.id == 'completion_time_changed'
        and completion_is_duration | bool
        and states(completion_sensor) | is_number
-       and (states(completion_sensor) | int(0)) % 5 == 0 }}
+       and (
+         (states(completion_sensor) | int(0)) % 5 == 0
+         or 0 < (states(completion_sensor) | float(0)) <= 5
+       ) }}
 
   start_timestamp: >-
     {{ as_timestamp(states(start_sensor), 0) | int if start_sensor else 0 }}
