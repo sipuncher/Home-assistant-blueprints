@@ -573,7 +573,7 @@ actions:
                             data:
                               tag: "{{ activity_tag }}"
                               live_update: true
-                              critical_text: "{{ appliance_state_display }}"
+                              critical_text: "{{ remaining_text }}"
                               progress: "{{ elapsed_seconds | int }}"
                               progress_max: "{{ total_seconds | int }}"
                               progress_bar_direction: increasing
@@ -602,7 +602,7 @@ actions:
                             data:
                               tag: "{{ activity_tag }}"
                               live_update: true
-                              critical_text: "{{ appliance_state_display }}"
+                              critical_text: "{{ remaining_text }}"
                               progress: "{{ progress_percentage | int }}"
                               progress_max: 100
                               progress_bar_direction: increasing
