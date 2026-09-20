@@ -1,0 +1,497 @@
+blueprint:
+  name: Appliance Live Activity - flexible countdown and progress
+  description: >-
+    Creates and updates a Home Assistant Companion App Live Activity for an
+    appliance using only its state entity and estimated completion timestamp.
+
+    No start-time entity or helper is required for the default countdown-only
+    mode. The countdown runs locally on the phone and is retargeted immediately
+    whenever the completion timestamp changes.
+
+    An optional progress bar can use either a native start timestamp or a native
+    percentage sensor. Do not manufacture a start-time helper solely for this
+    blueprint; leave progress disabled when the appliance does not expose useful
+    progress data.
+
+    Create one automation from this blueprint for each appliance, and give each
+    instance a unique activity tag.
+
+    Requirements:
+      - Home Assistant Core 2026.7.0 or later
+      - A Companion App version supporting Live Activities / Live Updates
+      - A completion sensor whose state is an ISO 8601 timestamp
+
+    Enter raw entity states as shown in Developer Tools > States. State matching
+    is case-insensitive and ignores surrounding whitespace.
+  domain: automation
+  author: OpenAI Codex for Simon
+  homeassistant:
+    min_version: 2026.7.0
+  input:
+    appliance:
+      name: Appliance
+      icon: mdi:washing-machine
+      input:
+        appliance_name:
+          name: Appliance name
+          description: Static title shown on the Live Activity.
+          default: Washing machine
+          selector:
+            text:
+        state_entity:
+          name: Appliance state entity
+          description: Entity reporting whether the appliance is running or finished.
+          selector:
+            entity:
+        completion_sensor:
+          name: Estimated completion timestamp
+          description: >-
+            Sensor whose state is the estimated completion date and time. Changes
+            to this sensor immediately retarget the countdown.
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+        finished_states:
+          name: Finished states
+          description: >-
+            One raw state per line. Entering one of these states completes the
+            Live Activity and can send a normal completion notification.
+          default: |-
+            finished
+            completed
+            program_ended
+          selector:
+            text:
+              multiline: true
+        cancelled_states:
+          name: Cancelled or idle states
+          description: >-
+            Optional: one raw state per line that should dismiss an existing Live
+            Activity without sending a completion notification. These only take
+            effect when the state entity changes into the configured state.
+          default: |-
+            off
+          selector:
+            text:
+              multiline: true
+
+    notifications:
+      name: Notifications
+      icon: mdi:cellphone
+      input:
+        notify_services:
+          name: Mobile notification actions
+          description: >-
+            YAML list of Companion App notification actions. Example:
+            - notify.mobile_app_simons_iphone
+            - notify.mobile_app_another_iphone
+          selector:
+            object:
+        activity_tag:
+          name: Live Activity tag
+          description: >-
+            Unique for each appliance. Use only letters, numbers, hyphens and
+            underscores, with a maximum of 64 characters.
+          default: washing_machine_cycle
+          selector:
+            text:
+        dashboard_url:
+          name: Tap destination
+          description: Home Assistant path opened when the activity is tapped.
+          default: /
+          selector:
+            text:
+        send_completion_notification:
+          name: Send normal completion notification
+          description: >-
+            Also send an ordinary notification when the appliance enters a
+            finished state, so completion produces an alert.
+          default: true
+          selector:
+            boolean:
+        clear_live_activity_on_finish:
+          name: Dismiss Live Activity on completion
+          description: >-
+            When enabled, dismiss the Live Activity at completion. When disabled,
+            update it to show the completed state.
+          default: false
+          selector:
+            boolean:
+
+    progress:
+      name: Optional progress bar
+      icon: mdi:progress-clock
+      collapsed: true
+      input:
+        progress_mode:
+          name: Progress source
+          description: >-
+            Disabled requires only the completion timestamp. Start and finish
+            timestamps calculates elapsed progress. Percentage sensor uses a
+            native numeric value from 0 to 100.
+          default: none
+          selector:
+            select:
+              options:
+                - label: Disabled - countdown only
+                  value: none
+                - label: Start and finish timestamps
+                  value: timestamps
+                - label: Percentage sensor
+                  value: percentage
+        start_sensor:
+          name: Start timestamp
+          description: >-
+            Optional. Used only in start-and-finish-timestamps mode. Its state
+            must be an ISO 8601 timestamp earlier than the completion timestamp.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+        progress_sensor:
+          name: Percentage sensor
+          description: >-
+            Optional. Used only in percentage-sensor mode. Values are limited to
+            the range 0 to 100.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+        progress_update_pattern:
+          name: Progress refresh interval
+          description: >-
+            Time-pattern minute value. /5 refreshes at minutes 0, 5, 10 and so
+            on. This is ignored when progress is disabled.
+          default: "/5"
+          selector:
+            text:
+
+    wording:
+      name: Wording
+      icon: mdi:format-text
+      collapsed: true
+      input:
+        running_message_format:
+          name: Running message
+          description: >-
+            Supports {finish_time} and {state}. The title is intentionally not
+            templated because iOS treats it as static after an activity starts.
+          default: "Running - due {finish_time}"
+          selector:
+            text:
+        completed_message:
+          name: Completed message
+          default: Cycle complete
+          selector:
+            text:
+        completion_notification_title:
+          name: Completion notification title
+          default: Appliance finished
+          selector:
+            text:
+
+    appearance:
+      name: Appearance
+      icon: mdi:palette
+      collapsed: true
+      input:
+        running_icon:
+          name: Running icon
+          default: mdi:washing-machine
+          selector:
+            icon:
+        running_color:
+          name: Running colour
+          default: "#2196F3"
+          selector:
+            text:
+        completed_icon:
+          name: Completed icon
+          default: mdi:check-circle
+          selector:
+            icon:
+        completed_color:
+          name: Completed colour
+          default: "#4CAF50"
+          selector:
+            text:
+
+mode: restart
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    entity_id: !input completion_sensor
+    id: completion_time_changed
+
+  - trigger: state
+    entity_id: !input state_entity
+    id: appliance_state_changed
+
+  - trigger: homeassistant
+    event: start
+    id: home_assistant_started
+
+  - trigger: time_pattern
+    minutes: !input progress_update_pattern
+    id: progress_update
+
+variables:
+  appliance_name: !input appliance_name
+  state_entity: !input state_entity
+  completion_sensor: !input completion_sensor
+  finished_states_input: !input finished_states
+  cancelled_states_input: !input cancelled_states
+  notify_services: !input notify_services
+  activity_tag: !input activity_tag
+  dashboard_url: !input dashboard_url
+  send_completion_notification: !input send_completion_notification
+  clear_live_activity_on_finish: !input clear_live_activity_on_finish
+  progress_mode: !input progress_mode
+  start_sensor: !input start_sensor
+  progress_sensor: !input progress_sensor
+  running_message_format: !input running_message_format
+  completed_message: !input completed_message
+  completion_notification_title: !input completion_notification_title
+  running_icon: !input running_icon
+  running_color: !input running_color
+  completed_icon: !input completed_icon
+  completed_color: !input completed_color
+
+  appliance_state: >-
+    {{ states(state_entity) | lower | trim }}
+
+  previous_appliance_state: >-
+    {% if trigger.id == 'appliance_state_changed' and trigger.from_state is not none %}
+      {{ trigger.from_state.state | lower | trim }}
+    {% else %}
+      unknown
+    {% endif %}
+
+  finished_states_list: >-
+    {{ finished_states_input.splitlines() | map('trim') | map('lower')
+       | reject('equalto', '') | list }}
+
+  cancelled_states_list: >-
+    {{ cancelled_states_input.splitlines() | map('trim') | map('lower')
+       | reject('equalto', '') | list }}
+
+  is_finished: >-
+    {{ appliance_state in finished_states_list }}
+
+  is_cancelled: >-
+    {{ appliance_state in cancelled_states_list }}
+
+  entered_finished_state: >-
+    {{ trigger.id == 'appliance_state_changed'
+       and appliance_state in finished_states_list
+       and previous_appliance_state not in finished_states_list }}
+
+  entered_cancelled_state: >-
+    {{ trigger.id == 'appliance_state_changed'
+       and appliance_state in cancelled_states_list
+       and previous_appliance_state not in cancelled_states_list }}
+
+  finish_timestamp: >-
+    {{ as_timestamp(states(completion_sensor), 0) | int }}
+
+  now_timestamp: >-
+    {{ as_timestamp(now()) | int }}
+
+  has_future_completion: >-
+    {{ finish_timestamp > now_timestamp }}
+
+  start_timestamp: >-
+    {{ as_timestamp(states(start_sensor), 0) | int if start_sensor else 0 }}
+
+  has_timestamp_progress: >-
+    {{ progress_mode == 'timestamps'
+       and start_timestamp > 0
+       and finish_timestamp > start_timestamp }}
+
+  total_seconds: >-
+    {{ [finish_timestamp - start_timestamp, 1] | max }}
+
+  elapsed_seconds: >-
+    {{ [[now_timestamp - start_timestamp, 0] | max, total_seconds] | min }}
+
+  has_percentage_progress: >-
+    {{ progress_mode == 'percentage'
+       and progress_sensor
+       and states(progress_sensor) not in ['unknown', 'unavailable', 'none', ''] }}
+
+  progress_percentage: >-
+    {{ [[states(progress_sensor) | float(0), 0] | max, 100] | min | round(0) | int
+       if progress_sensor else 0 }}
+
+  finish_local: >-
+    {% if finish_timestamp > 0 %}
+      {{ finish_timestamp | timestamp_custom('%H:%M', true) }}
+    {% else %}
+      unknown
+    {% endif %}
+
+  running_message: >-
+    {{ running_message_format
+       | replace('{finish_time}', finish_local)
+       | replace('{state}', appliance_state) }}
+
+actions:
+  - choose:
+      - alias: Dismiss cancelled activity
+        conditions:
+          - condition: template
+            value_template: "{{ entered_cancelled_state }}"
+        sequence:
+          - repeat:
+              for_each: "{{ notify_services }}"
+              sequence:
+                - action: "{{ repeat.item }}"
+                  data:
+                    message: clear_notification
+                    data:
+                      tag: "{{ activity_tag }}"
+
+      - alias: Complete activity
+        conditions:
+          - condition: template
+            value_template: "{{ entered_finished_state }}"
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ clear_live_activity_on_finish | bool }}"
+            then:
+              - repeat:
+                  for_each: "{{ notify_services }}"
+                  sequence:
+                    - action: "{{ repeat.item }}"
+                      data:
+                        message: clear_notification
+                        data:
+                          tag: "{{ activity_tag }}"
+            else:
+              - repeat:
+                  for_each: "{{ notify_services }}"
+                  sequence:
+                    - action: "{{ repeat.item }}"
+                      data:
+                        title: "{{ appliance_name }}"
+                        message: "{{ completed_message }}"
+                        data:
+                          tag: "{{ activity_tag }}"
+                          live_update: true
+                          critical_text: Done
+                          progress: 100
+                          progress_max: 100
+                          alert_once: true
+                          silent: true
+                          notification_icon: "{{ completed_icon }}"
+                          notification_icon_color: "{{ completed_color }}"
+                          color: "{{ completed_color }}"
+                          url: "{{ dashboard_url }}"
+
+          - if:
+              - condition: template
+                value_template: "{{ send_completion_notification | bool }}"
+            then:
+              - repeat:
+                  for_each: "{{ notify_services }}"
+                  sequence:
+                    - action: "{{ repeat.item }}"
+                      data:
+                        title: "{{ completion_notification_title }}"
+                        message: "{{ completed_message }}"
+                        data:
+                          tag: "{{ activity_tag }}_complete"
+                          notification_icon: "{{ completed_icon }}"
+                          color: "{{ completed_color }}"
+                          url: "{{ dashboard_url }}"
+
+      - alias: Start or update countdown
+        conditions:
+          - condition: template
+            value_template: >-
+              {{ has_future_completion
+                 and not is_finished
+                 and not is_cancelled
+                 and appliance_state not in ['unknown', 'unavailable']
+                 and (trigger.id != 'progress_update' or progress_mode != 'none') }}
+        sequence:
+          - choose:
+              - alias: Update with timestamp-derived progress
+                conditions:
+                  - condition: template
+                    value_template: "{{ has_timestamp_progress }}"
+                sequence:
+                  - repeat:
+                      for_each: "{{ notify_services }}"
+                      sequence:
+                        - action: "{{ repeat.item }}"
+                          data:
+                            title: "{{ appliance_name }}"
+                            message: "{{ running_message }}"
+                            data:
+                              tag: "{{ activity_tag }}"
+                              live_update: true
+                              chronometer: true
+                              when: "{{ finish_timestamp }}"
+                              progress: "{{ elapsed_seconds | int }}"
+                              progress_max: "{{ total_seconds | int }}"
+                              alert_once: true
+                              silent: true
+                              notification_icon: "{{ running_icon }}"
+                              notification_icon_color: "{{ running_color }}"
+                              progress_bar_color: "{{ running_color }}"
+                              color: "{{ running_color }}"
+                              url: "{{ dashboard_url }}"
+
+              - alias: Update with percentage progress
+                conditions:
+                  - condition: template
+                    value_template: "{{ has_percentage_progress }}"
+                sequence:
+                  - repeat:
+                      for_each: "{{ notify_services }}"
+                      sequence:
+                        - action: "{{ repeat.item }}"
+                          data:
+                            title: "{{ appliance_name }}"
+                            message: "{{ running_message }}"
+                            data:
+                              tag: "{{ activity_tag }}"
+                              live_update: true
+                              chronometer: true
+                              when: "{{ finish_timestamp }}"
+                              progress: "{{ progress_percentage | int }}"
+                              progress_max: 100
+                              alert_once: true
+                              silent: true
+                              notification_icon: "{{ running_icon }}"
+                              notification_icon_color: "{{ running_color }}"
+                              progress_bar_color: "{{ running_color }}"
+                              color: "{{ running_color }}"
+                              url: "{{ dashboard_url }}"
+
+            default:
+              - repeat:
+                  for_each: "{{ notify_services }}"
+                  sequence:
+                    - action: "{{ repeat.item }}"
+                      data:
+                        title: "{{ appliance_name }}"
+                        message: "{{ running_message }}"
+                        data:
+                          tag: "{{ activity_tag }}"
+                          live_update: true
+                          chronometer: true
+                          when: "{{ finish_timestamp }}"
+                          alert_once: true
+                          silent: true
+                          notification_icon: "{{ running_icon }}"
+                          notification_icon_color: "{{ running_color }}"
+                          color: "{{ running_color }}"
+                          url: "{{ dashboard_url }}"
+    default: []
