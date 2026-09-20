@@ -2,7 +2,9 @@ blueprint:
   name: Appliance Live Activity - flexible countdown and progress
   description: >-
     Creates and updates a Home Assistant Companion App Live Activity for an
-    appliance using only its state entity and estimated completion timestamp.
+    appliance using only its state entity and estimated completion sensor. The
+    completion sensor may be either an absolute timestamp or a remaining
+    duration such as 147 minutes.
 
     No start-time entity or helper is required for the default countdown-only
     mode. The countdown runs locally on the phone and is retargeted immediately
@@ -19,7 +21,7 @@ blueprint:
     Requirements:
       - Home Assistant Core 2026.7.0 or later
       - A Companion App version supporting Live Activities / Live Updates
-      - A completion sensor whose state is an ISO 8601 timestamp
+      - A completion sensor with device class timestamp or duration
 
     Enter raw entity states as shown in Developer Tools > States. State matching
     is case-insensitive and ignores surrounding whitespace.
@@ -44,10 +46,11 @@ blueprint:
           selector:
             entity:
         completion_sensor:
-          name: Estimated completion timestamp
+          name: Estimated completion time
           description: >-
-            Sensor whose state is the estimated completion date and time. Changes
-            to this sensor immediately retarget the countdown.
+            Either a timestamp sensor containing the estimated completion date
+            and time, or a duration sensor containing the remaining time. The
+            blueprint detects the type and unit automatically.
           selector:
             entity:
               filter:
@@ -245,7 +248,7 @@ variables:
   completion_sensor: !input completion_sensor
   finished_states_input: !input finished_states
   cancelled_states_input: !input cancelled_states
-  notify_services: !input notify_services
+  notify_services_input: !input notify_services
   activity_tag: !input activity_tag
   dashboard_url: !input dashboard_url
   send_completion_notification: !input send_completion_notification
@@ -260,6 +263,13 @@ variables:
   running_color: !input running_color
   completed_icon: !input completed_icon
   completed_color: !input completed_color
+
+  notify_services: >-
+    {% if notify_services_input is string %}
+      {{ [notify_services_input] }}
+    {% else %}
+      {{ notify_services_input }}
+    {% endif %}
 
   appliance_state: >-
     {{ states(state_entity) | lower | trim }}
@@ -295,14 +305,71 @@ variables:
        and appliance_state in cancelled_states_list
        and previous_appliance_state not in cancelled_states_list }}
 
-  finish_timestamp: >-
-    {{ as_timestamp(states(completion_sensor), 0) | int }}
-
   now_timestamp: >-
     {{ as_timestamp(now()) | int }}
 
+  completion_device_class: >-
+    {{ state_attr(completion_sensor, 'device_class') | default('', true) | lower }}
+
+  completion_unit: >-
+    {{ state_attr(completion_sensor, 'unit_of_measurement') | default('', true) | lower }}
+
+  completion_multiplier: >-
+    {% if completion_unit in ['ms', 'millisecond', 'milliseconds'] %}
+      0.001
+    {% elif completion_unit in ['s', 'sec', 'second', 'seconds'] %}
+      1
+    {% elif completion_unit in ['min', 'minute', 'minutes'] %}
+      60
+    {% elif completion_unit in ['h', 'hr', 'hour', 'hours'] %}
+      3600
+    {% elif completion_unit in ['d', 'day', 'days'] %}
+      86400
+    {% else %}
+      1
+    {% endif %}
+
+  completion_is_duration: >-
+    {{ completion_device_class == 'duration' }}
+
+  completion_value_is_valid: >-
+    {{ states(completion_sensor) | is_number
+       if completion_is_duration | bool
+       else as_timestamp(states(completion_sensor), none) is not none }}
+
+  finish_timestamp: >-
+    {% if completion_is_duration | bool and states(completion_sensor) | is_number %}
+      {{ (now_timestamp + (states(completion_sensor) | float(0)
+          * completion_multiplier | float(1))) | int }}
+    {% else %}
+      {{ as_timestamp(states(completion_sensor), 0) | int }}
+    {% endif %}
+
   has_future_completion: >-
-    {{ finish_timestamp > now_timestamp }}
+    {{ completion_value_is_valid | bool and finish_timestamp > now_timestamp }}
+
+  completion_change_is_meaningful: >-
+    {% if trigger.id != 'completion_time_changed' %}
+      true
+    {% elif not (completion_is_duration | bool) %}
+      true
+    {% elif trigger.from_state is none or trigger.to_state is none
+          or not (trigger.from_state.state | is_number)
+          or not (trigger.to_state.state | is_number) %}
+      true
+    {% else %}
+      {% set previous_finish = as_timestamp(trigger.from_state.last_updated)
+          + (trigger.from_state.state | float(0) * completion_multiplier | float(1)) %}
+      {% set current_finish = as_timestamp(trigger.to_state.last_updated)
+          + (trigger.to_state.state | float(0) * completion_multiplier | float(1)) %}
+      {{ (current_finish - previous_finish) | abs >= 60 }}
+    {% endif %}
+
+  duration_refresh_due: >-
+    {{ trigger.id == 'completion_time_changed'
+       and completion_is_duration | bool
+       and states(completion_sensor) | is_number
+       and (states(completion_sensor) | int(0)) % 5 == 0 }}
 
   start_timestamp: >-
     {{ as_timestamp(states(start_sensor), 0) | int if start_sensor else 0 }}
@@ -321,7 +388,7 @@ variables:
   has_percentage_progress: >-
     {{ progress_mode == 'percentage'
        and progress_sensor
-       and states(progress_sensor) not in ['unknown', 'unavailable', 'none', ''] }}
+       and states(progress_sensor) | is_number }}
 
   progress_percentage: >-
     {{ [[states(progress_sensor) | float(0), 0] | max, 100] | min | round(0) | int
@@ -341,10 +408,29 @@ variables:
 
 actions:
   - choose:
+      - alias: Ignore routine duration countdown tick
+        conditions:
+          - condition: template
+            value_template: >-
+              {{ trigger.id == 'completion_time_changed'
+                 and completion_is_duration | bool
+                 and not (completion_change_is_meaningful | bool)
+                 and not (duration_refresh_due | bool) }}
+        sequence:
+          - stop: Routine remaining-time tick; no phone update required
+
+      - alias: Ignore scheduled refresh when progress is disabled
+        conditions:
+          - condition: template
+            value_template: >-
+              {{ trigger.id == 'progress_update' and progress_mode == 'none' }}
+        sequence:
+          - stop: Progress is disabled; scheduled refresh not required
+
       - alias: Dismiss cancelled activity
         conditions:
           - condition: template
-            value_template: "{{ entered_cancelled_state }}"
+            value_template: "{{ entered_cancelled_state | bool }}"
         sequence:
           - repeat:
               for_each: "{{ notify_services }}"
@@ -358,7 +444,7 @@ actions:
       - alias: Complete activity
         conditions:
           - condition: template
-            value_template: "{{ entered_finished_state }}"
+            value_template: "{{ entered_finished_state | bool }}"
         sequence:
           - if:
               - condition: template
@@ -414,17 +500,16 @@ actions:
         conditions:
           - condition: template
             value_template: >-
-              {{ has_future_completion
-                 and not is_finished
-                 and not is_cancelled
-                 and appliance_state not in ['unknown', 'unavailable']
-                 and (trigger.id != 'progress_update' or progress_mode != 'none') }}
+              {{ has_future_completion | bool
+                 and not (is_finished | bool)
+                 and not (is_cancelled | bool)
+                 and appliance_state not in ['unknown', 'unavailable'] }}
         sequence:
           - choose:
               - alias: Update with timestamp-derived progress
                 conditions:
                   - condition: template
-                    value_template: "{{ has_timestamp_progress }}"
+                    value_template: "{{ has_timestamp_progress | bool }}"
                 sequence:
                   - repeat:
                       for_each: "{{ notify_services }}"
@@ -451,7 +536,7 @@ actions:
               - alias: Update with percentage progress
                 conditions:
                   - condition: template
-                    value_template: "{{ has_percentage_progress }}"
+                    value_template: "{{ has_percentage_progress | bool }}"
                 sequence:
                   - repeat:
                       for_each: "{{ notify_services }}"
