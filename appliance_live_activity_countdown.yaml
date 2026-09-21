@@ -15,9 +15,10 @@ blueprint:
     blueprint; leave progress disabled when the appliance does not expose useful
     progress data.
 
-    Duration-based appliances refresh every five minutes during most of a cycle,
-    then every minute during the final five minutes. Completion alerts are sent
-    when the configured appliance state enters a finished state.
+    Appliances refresh every five minutes during most of a cycle, then every
+    minute during the final five minutes. Completion alerts are sent when the
+    configured appliance state enters a finished state. Simultaneous end-of-cycle
+    entity changes are queued so they cannot cancel the completion alert.
 
     Create one automation from this blueprint for each appliance, and give each
     instance a unique activity tag.
@@ -250,7 +251,8 @@ blueprint:
           selector:
             text:
 
-mode: restart
+mode: queued
+max: 10
 max_exceeded: silent
 
 triggers:
@@ -269,6 +271,10 @@ triggers:
   - trigger: time_pattern
     minutes: !input progress_update_pattern
     id: progress_update
+
+  - trigger: time_pattern
+    minutes: "/1"
+    id: final_minute_update
 
 variables:
   appliance_name: !input appliance_name
@@ -465,6 +471,20 @@ variables:
 
 actions:
   - choose:
+      - alias: Ignore per-minute refresh outside final five timestamp minutes
+        conditions:
+          - condition: template
+            value_template: >-
+              {{ trigger.id == 'final_minute_update'
+                 and (
+                   completion_is_duration | bool
+                   or remaining_seconds | int <= 0
+                   or remaining_seconds | int > 300
+                   or now().minute % 5 == 0
+                 ) }}
+        sequence:
+          - stop: Per-minute refresh is only needed for timestamp sensors in their final five minutes
+
       - alias: Ignore routine duration countdown tick
         conditions:
           - condition: template
