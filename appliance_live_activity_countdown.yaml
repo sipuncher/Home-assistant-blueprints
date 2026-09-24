@@ -23,6 +23,10 @@ blueprint:
     Create one automation from this blueprint for each appliance, and give each
     instance a unique activity tag.
 
+    Notification recipients can optionally be paired with person entities so
+    each phone is updated only while its owner is home. Existing plain lists of
+    notify.mobile_app actions remain supported and continue to notify normally.
+
     Requirements:
       - Home Assistant Core 2026.7.0 or later
       - A Companion App version supporting Live Activities / Live Updates
@@ -89,11 +93,21 @@ blueprint:
       icon: mdi:cellphone
       input:
         notify_services:
-          name: Mobile notification actions
+          name: Mobile notification recipients
           description: >-
-            YAML list of Companion App notification actions. Example:
-            - notify.mobile_app_simons_iphone
-            - notify.mobile_app_another_iphone
+            YAML list of Companion App notification recipients. A plain action
+            remains supported and is always notified. To filter a recipient by
+            presence, provide its action, person entity and only_when_home flag.
+            If the person is unknown or unavailable, the notification is sent
+            so a temporary presence failure does not hide appliance completion.
+
+            Example:
+            - action: notify.mobile_app_simons_phone
+              person: person.simon
+              only_when_home: true
+            - action: notify.mobile_app_clare_s_iphone
+              person: person.clare
+              only_when_home: true
           selector:
             object:
         activity_tag:
@@ -300,12 +314,68 @@ variables:
   completed_icon: !input completed_icon
   completed_color: !input completed_color
 
-  notify_services: >-
-    {% if notify_services_input is string %}
+  notification_recipients: >-
+    {% if notify_services_input is string or notify_services_input is mapping %}
       {{ [notify_services_input] }}
     {% else %}
       {{ notify_services_input }}
     {% endif %}
+
+  all_notify_services: >-
+    {% set ns = namespace(actions=[]) %}
+    {% for recipient in notification_recipients %}
+      {% if recipient is mapping %}
+        {% set recipient_action = recipient.get('action', recipient.get('notify', '')) | string | trim %}
+      {% else %}
+        {% set recipient_action = recipient | string | trim %}
+      {% endif %}
+      {% if recipient_action %}
+        {% set ns.actions = ns.actions + [recipient_action] %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.actions }}
+
+  active_notify_services: >-
+    {% set ns = namespace(actions=[]) %}
+    {% for recipient in notification_recipients %}
+      {% if recipient is mapping %}
+        {% set recipient_action = recipient.get('action', recipient.get('notify', '')) | string | trim %}
+        {% set recipient_person = recipient.get('person', '') | string | trim %}
+        {% set only_when_home = recipient.get('only_when_home', false) | bool %}
+      {% else %}
+        {% set recipient_action = recipient | string | trim %}
+        {% set recipient_person = '' %}
+        {% set only_when_home = false %}
+      {% endif %}
+      {% set presence_state = states(recipient_person) if recipient_person else 'unknown' %}
+      {% set may_receive = not only_when_home
+         or not recipient_person
+         or presence_state in ['home', 'unknown', 'unavailable'] %}
+      {% if recipient_action and may_receive %}
+        {% set ns.actions = ns.actions + [recipient_action] %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.actions }}
+
+  inactive_notify_services: >-
+    {% set ns = namespace(actions=[]) %}
+    {% for recipient in notification_recipients %}
+      {% if recipient is mapping %}
+        {% set recipient_action = recipient.get('action', recipient.get('notify', '')) | string | trim %}
+        {% set recipient_person = recipient.get('person', '') | string | trim %}
+        {% set only_when_home = recipient.get('only_when_home', false) | bool %}
+      {% else %}
+        {% set recipient_action = recipient | string | trim %}
+        {% set recipient_person = '' %}
+        {% set only_when_home = false %}
+      {% endif %}
+      {% set presence_state = states(recipient_person) if recipient_person else 'unknown' %}
+      {% if recipient_action and only_when_home and recipient_person
+            and presence_state not in ['home', 'unknown', 'unavailable'] %}
+        {% set ns.actions = ns.actions + [recipient_action] %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.actions }}
 
   appliance_state: >-
     {{ states(state_entity) | lower | trim }}
@@ -510,7 +580,7 @@ actions:
             value_template: "{{ entered_cancelled_state | bool }}"
         sequence:
           - repeat:
-              for_each: "{{ notify_services }}"
+              for_each: "{{ all_notify_services }}"
               sequence:
                 - action: "{{ repeat.item }}"
                   data:
@@ -528,7 +598,7 @@ actions:
                 value_template: "{{ clear_live_activity_on_finish | bool }}"
             then:
               - repeat:
-                  for_each: "{{ notify_services }}"
+                  for_each: "{{ all_notify_services }}"
                   sequence:
                     - action: "{{ repeat.item }}"
                       data:
@@ -537,7 +607,7 @@ actions:
                           tag: "{{ activity_tag }}"
             else:
               - repeat:
-                  for_each: "{{ notify_services }}"
+                  for_each: "{{ active_notify_services }}"
                   sequence:
                     - action: "{{ repeat.item }}"
                       data:
@@ -556,12 +626,21 @@ actions:
                           color: "{{ completed_color }}"
                           url: "{{ dashboard_url }}"
 
+              - repeat:
+                  for_each: "{{ inactive_notify_services }}"
+                  sequence:
+                    - action: "{{ repeat.item }}"
+                      data:
+                        message: clear_notification
+                        data:
+                          tag: "{{ activity_tag }}"
+
           - if:
               - condition: template
                 value_template: "{{ send_completion_notification | bool }}"
             then:
               - repeat:
-                  for_each: "{{ notify_services }}"
+                  for_each: "{{ active_notify_services }}"
                   sequence:
                     - action: "{{ repeat.item }}"
                       data:
@@ -582,6 +661,15 @@ actions:
                  and not (is_cancelled | bool)
                  and appliance_state not in ['unknown', 'unavailable'] }}
         sequence:
+          - repeat:
+              for_each: "{{ inactive_notify_services }}"
+              sequence:
+                - action: "{{ repeat.item }}"
+                  data:
+                    message: clear_notification
+                    data:
+                      tag: "{{ activity_tag }}"
+
           - choose:
               - alias: Show state, timestamp progress and remaining time
                 conditions:
@@ -591,7 +679,7 @@ actions:
                          and has_timestamp_progress | bool }}
                 sequence:
                   - repeat:
-                      for_each: "{{ notify_services }}"
+                      for_each: "{{ active_notify_services }}"
                       sequence:
                         - action: "{{ repeat.item }}"
                           data:
@@ -620,7 +708,7 @@ actions:
                          and has_percentage_progress | bool }}
                 sequence:
                   - repeat:
-                      for_each: "{{ notify_services }}"
+                      for_each: "{{ active_notify_services }}"
                       sequence:
                         - action: "{{ repeat.item }}"
                           data:
@@ -651,7 +739,7 @@ actions:
                              and not (has_percentage_progress | bool)) }}
                 sequence:
                   - repeat:
-                      for_each: "{{ notify_services }}"
+                      for_each: "{{ active_notify_services }}"
                       sequence:
                         - action: "{{ repeat.item }}"
                           data:
@@ -678,7 +766,7 @@ actions:
                          and has_timestamp_progress | bool }}
                 sequence:
                   - repeat:
-                      for_each: "{{ notify_services }}"
+                      for_each: "{{ active_notify_services }}"
                       sequence:
                         - action: "{{ repeat.item }}"
                           data:
@@ -709,7 +797,7 @@ actions:
                          and has_percentage_progress | bool }}
                 sequence:
                   - repeat:
-                      for_each: "{{ notify_services }}"
+                      for_each: "{{ active_notify_services }}"
                       sequence:
                         - action: "{{ repeat.item }}"
                           data:
@@ -734,7 +822,7 @@ actions:
 
             default:
               - repeat:
-                  for_each: "{{ notify_services }}"
+                  for_each: "{{ active_notify_services }}"
                   sequence:
                     - action: "{{ repeat.item }}"
                       data:
